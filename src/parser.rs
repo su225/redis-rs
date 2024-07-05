@@ -255,10 +255,9 @@ impl RedisCodec {
                     if bulk_str.len() < 4 {
                         return Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars);
                     }
-                    if bulk_str[3] != ':' {
-                        return Err(RedisParseError::VerbatimStringFormatMalformed)
-                    }
-                    let mut parts = bulk_str.splitn(2, ":").collect::<Vec<String>>();
+                    let mut parts = bulk_str.splitn(2, ":")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<String>>();
                     if parts.len() != 2 {
                         return Err(RedisParseError::VerbatimStringFormatMalformed);
                     }
@@ -561,12 +560,22 @@ mod redis_decoding {
             ("positive with negative EXPONENT", ",1.23E-2\r\n", Ok(Some(Double(1.23e-2)))),
             ("positive infinity", ",inf\r\n", Ok(Some(Double(f64::INFINITY)))),
             ("negative infinity", ",-inf\r\n", Ok(Some(Double(f64::NEG_INFINITY)))),
-            ("not a number - NaN", ",nan\r\n", Ok(Some(Double(f64::NAN)))),
         ] {
             let mut buffer = BytesMut::from(redis_str);
             let decoded = codec.decode(&mut buffer);
             assert_eq!(decoded, expected, "failed test {name:?}")
         }
+    }
+
+    #[test]
+    fn test_parse_double_nan() {
+        let mut buffer = BytesMut::from(",nan\r\n");
+        let mut codec = RedisCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert!(match decoded.unwrap().unwrap() {
+            Double(x) if x.is_nan() => true,
+            _ => false,
+        })
     }
 
     #[test]
