@@ -18,8 +18,14 @@ pub enum RedisCommand {
     Boolean(bool),                 // #
     Double(f64),                   // ,
     BigNumber(BigInt),             // (
-    BulkError,                     // !
-    VerbatimString,                // =
+    BulkError(String),             // !
+    VerbatimString{
+        encoding: String,
+        data: String,
+    },                                    // =
+    Map(Vec<(RedisCommand, RedisCommand)>), // %
+    Set(Vec<RedisCommand>),                 // ~
+    Push(Vec<RedisCommand>),                // >
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -193,39 +199,22 @@ impl RedisCodec {
                 Ok(Some(RedisCommand::Integer(num)))
             },
             b'$' => {
-                let strlen = get_integer(&mut cursor)?;
-                if strlen == -1 {
+                if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
+                    Ok(Some(RedisCommand::BulkString(bulk_str)))
+                } else {
                     Ok(Some(RedisCommand::Null))
-                } else if strlen < 0 {
-                    Err(RedisParseError::NegativeLength)
-                } else {
-                    let line = get_line(&mut cursor)?;
-                    if line.len() != (strlen as usize) {
-                        Err(RedisParseError::MalformedBulkStringLengthMismatch)
-                    } else {
-                        let str = std::str::from_utf8(line)?;
-                        Ok(Some(RedisCommand::BulkString(str.to_string())))
-                    }
                 }
             },
-            b'*' => {
-                let arr_len = get_integer(&mut cursor)?;
-                if arr_len < 0 {
-                    Err(RedisParseError::NegativeLength)
-                } else if arr_len == 0 {
-                    Ok(Some(RedisCommand::Array(vec![])))
+            b'!' => {
+                if let Some(bulk_err) = self.parse_bulk_string(&mut cursor)? {
+                    Ok(Some(RedisCommand::BulkError(bulk_err)))
                 } else {
-                    let mut commands = Vec::with_capacity(arr_len as usize);
-                    for i in 0..arr_len as usize {
-                        match self.parse_redis_command(&mut cursor) {
-                            Ok(Some(cmd)) => commands.push(cmd),
-                            Ok(None) => return Err(RedisParseError::AggregateError(i, Box::new(RedisParseError::MalformedCommand))),
-                            Err(inner_cmd) => return Err(RedisParseError::AggregateError(i, Box::new(inner_cmd))),
-                        }
-                    }
-                    Ok(Some(RedisCommand::Array(commands)))
+                    Ok(Some(RedisCommand::Null))
                 }
-            },
+            }
+            b'*' => Ok(Some(RedisCommand::Array(self.parse_aggregate(&mut cursor)?))),
+            b'~' => Ok(Some(RedisCommand::Set(self.parse_aggregate(&mut cursor)?))),
+            b'>' => Ok(Some(RedisCommand::Push(self.parse_aggregate(&mut cursor)?))),
             b'_' => {
                 let line = get_line(&mut cursor)?;
                 if line.len() > 0 {
@@ -242,7 +231,7 @@ impl RedisCodec {
                     match line[0] {
                         b't' => Ok(Some(RedisCommand::Boolean(true))),
                         b'f' => Ok(Some(RedisCommand::Boolean(false))),
-                        oth  => Err(RedisParseError::MalformedBoolean(oth.to_string())),
+                        oth  => Err(RedisParseError::MalformedBoolean((oth as char).to_string())),
                     }
                 }
             },
@@ -254,26 +243,90 @@ impl RedisCodec {
                 }
             },
             b'(' => {
-                todo!()
-            },
-            b'!' => {
-                todo!()
+                let line = get_line(&mut cursor)?;
+                if let Some(bigint) = BigInt::parse_bytes(line, 10) {
+                    Ok(Some(RedisCommand::BigNumber(bigint)))
+                } else {
+                    Err(RedisParseError::MalformedInteger)
+                }
             },
             b'=' => {
-                todo!()
+                if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
+                    if bulk_str.len() < 4 {
+                        return Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars);
+                    }
+                    if bulk_str[3] != ':' {
+                        return Err(RedisParseError::VerbatimStringFormatMalformed)
+                    }
+                    let mut parts = bulk_str.splitn(2, ":").collect::<Vec<String>>();
+                    if parts.len() != 2 {
+                        return Err(RedisParseError::VerbatimStringFormatMalformed);
+                    }
+                    Ok(Some(RedisCommand::VerbatimString {
+                        encoding: parts.swap_remove(0),
+                        data: parts.swap_remove(1),
+                    }))
+                } else {
+                    Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars)
+                }
             },
             b'%' => {
-                todo!()
+                let num_entries = get_integer(&mut cursor)?;
+                if num_entries < 0 {
+                    Err(RedisParseError::NegativeLength)
+                } else if num_entries == 0 {
+                    Ok(Some(RedisCommand::Map(vec![])))
+                } else {
+                    let mut entries = Vec::with_capacity(num_entries as usize);
+                    for i in 0..num_entries as usize {
+                        let key_cmd = self.parse_redis_command(&mut cursor)
+                            .map_err(|err| RedisParseError::AggregateError(i, Box::new(err)))?
+                            .ok_or(RedisParseError::MalformedCommand)?;
+                        let val_cmd = self.parse_redis_command(&mut cursor)
+                            .map_err(|err| RedisParseError::AggregateError(i, Box::new(err)))?
+                            .ok_or(RedisParseError::MalformedCommand)?;
+                        entries.push((key_cmd, val_cmd));
+                    }
+                    Ok(Some(RedisCommand::Map(entries)))
+                }
             },
-            b'~' => {
-                todo!()
-            },
-            b'>' => {
-                todo!()
-            },
-            _ => {
-                todo!()
+            c => Err(RedisParseError::UnknownCommandType(c as char)),
+        }
+    }
+
+    fn parse_bulk_string(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<String>, RedisParseError> {
+        let strlen = get_integer(&mut cursor)?;
+        if strlen == -1 {
+            Ok(None)
+        } else if strlen < 0 {
+            Err(RedisParseError::NegativeLength)
+        } else {
+            let line = get_line(&mut cursor)?;
+            if line.len() != (strlen as usize) {
+                Err(RedisParseError::MalformedBulkStringLengthMismatch)
+            } else {
+                let str = std::str::from_utf8(line)?;
+                return Ok(Some(str.to_string()))
             }
+        }
+    }
+
+    fn parse_aggregate(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Vec<RedisCommand>, RedisParseError> {
+        let arr_len = get_integer(&mut cursor)?;
+        if arr_len < 0 {
+            Err(RedisParseError::NegativeLength)
+        } else if arr_len == 0 {
+            Ok(vec![])
+        } else {
+            let mut commands = Vec::with_capacity(arr_len as usize);
+            for i in 0..arr_len as usize {
+                match self.parse_redis_command(&mut cursor) {
+                    Ok(Some(cmd)) => commands.push(cmd),
+                    Ok(None) => return Err(RedisParseError::AggregateError(i, Box::new(RedisParseError::MalformedCommand))),
+                    Err(inner_cmd) => return Err(RedisParseError::AggregateError(i, Box::new(inner_cmd))),
+                }
+            }
+            Ok(commands)
         }
     }
 }
@@ -514,5 +567,20 @@ mod redis_decoding {
             let decoded = codec.decode(&mut buffer);
             assert_eq!(decoded, expected, "failed test {name:?}")
         }
+    }
+
+    #[test]
+    fn test_positive_bigint() {
+
+    }
+
+    #[test]
+    fn test_negative_bigint() {
+
+    }
+
+    #[test]
+    fn test_invalid_bigint_representations() {
+
     }
 }
