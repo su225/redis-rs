@@ -1,11 +1,31 @@
 use std::io::{Cursor, Error};
 use std::str::Utf8Error;
-
+use num::Num;
 use num_bigint::BigInt;
-use tokio_util::bytes::{Buf, BytesMut};
-use tokio_util::codec::Decoder;
+use tokio_util::bytes::{Buf, BufMut, BytesMut};
+use tokio_util::codec::{Decoder, Encoder};
 
-pub struct RedisCodec;
+#[non_exhaustive]
+pub struct RESPOpcode;
+
+impl RESPOpcode {
+    pub const SIMPLE_STRING: u8   = b'+';
+    pub const SIMPLE_ERROR: u8    = b'-';
+    pub const INTEGER: u8         = b':';
+    pub const BULK_STRING: u8     = b'$';
+    pub const ARRAY: u8           = b'*';
+    pub const NULL: u8            = b'_';
+    pub const BOOLEAN: u8         = b'#';
+    pub const DOUBLE: u8          = b',';
+    pub const BIG_NUMBER: u8      = b'(';
+    pub const BULK_ERROR: u8      = b'!';
+    pub const VERBATIM_STRING: u8 = b'=';
+    pub const MAP: u8             = b'%';
+    pub const SET: u8             = b'~';
+    pub const PUSH: u8            = b'>';
+}
+
+pub struct RESPCodec;
 
 #[derive(Debug, PartialEq)]
 pub enum RESPItem {
@@ -26,6 +46,27 @@ pub enum RESPItem {
     Map(Vec<(RESPItem, RESPItem)>), // %
     Set(Vec<RESPItem>),             // ~
     Push(Vec<RESPItem>),            // >
+}
+
+impl RESPItem {
+    fn opcode(&self) -> u8 {
+        match self {
+            RESPItem::SimpleString(_) => RESPOpcode::SIMPLE_STRING,
+            RESPItem::SimpleError(_) => RESPOpcode::SIMPLE_ERROR,
+            RESPItem::Integer(_) => RESPOpcode::INTEGER,
+            RESPItem::BulkString(_) => RESPOpcode::BULK_STRING,
+            RESPItem::Array(_) => RESPOpcode::ARRAY,
+            RESPItem::Null => RESPOpcode::NULL,
+            RESPItem::Boolean(_) => RESPOpcode::BOOLEAN,
+            RESPItem::Double(_) => RESPOpcode::DOUBLE,
+            RESPItem::BigNumber(_) => RESPOpcode::BIG_NUMBER,
+            RESPItem::BulkError(_) => RESPOpcode::BULK_ERROR,
+            RESPItem::VerbatimString { .. } => RESPOpcode::VERBATIM_STRING,
+            RESPItem::Map(_) => RESPOpcode::MAP,
+            RESPItem::Set(_) => RESPOpcode::SET,
+            RESPItem::Push(_) => RESPOpcode::PUSH,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -59,9 +100,21 @@ impl From<Utf8Error> for RESPParseError {
     }
 }
 
-impl RedisCodec {
+#[derive(Debug, Eq, PartialEq)]
+pub enum RESPEncodeError {
+    Inner(String),
+    VerbatimStringEncodingNameLength,
+}
+
+impl From<Error> for RESPEncodeError {
+    fn from(value: Error) -> Self {
+        RESPEncodeError::Inner(value.to_string())
+    }
+}
+
+impl RESPCodec {
     pub fn new() -> Self {
-        RedisCodec {}
+        RESPCodec {}
     }
 
     fn decode_redis_command(&mut self, buf: &mut BytesMut) -> Result<Option<RESPItem>, RESPParseError> {
@@ -82,15 +135,15 @@ impl RedisCodec {
         }
         let opcode = buf.get_u8();
         match opcode {
-            b'+' | b'-' => {
+            RESPOpcode::SIMPLE_STRING | RESPOpcode::SIMPLE_ERROR => {
                 let _ = get_line(buf)?;
                 Ok(())
             },
-            b':' => {
+            RESPOpcode::INTEGER => {
                 let _ = get_integer(buf)?;
                 Ok(())
             },
-            b'$' | b'!' => {
+            RESPOpcode::BULK_STRING | RESPOpcode::BULK_ERROR => {
                 let str_len = get_integer(buf)?;
                 if str_len < -1 {
                     Err(RESPParseError::NegativeLength)
@@ -105,7 +158,7 @@ impl RedisCodec {
                     }
                 }
             },
-            b'*' | b'~' | b'>' => {
+            RESPOpcode::ARRAY | RESPOpcode::SET | RESPOpcode::PUSH => {
                 let arr_len = get_integer(buf)?;
                 if arr_len < 0 {
                     Err(RESPParseError::MalformedArrayNegativeLength)
@@ -118,7 +171,7 @@ impl RedisCodec {
                     return Ok(());
                 }
             },
-            b'_' => {
+            RESPOpcode::NULL => {
                 let s = get_line(buf)?;
                 if !s.is_empty() {
                     Err(RESPParseError::MalformedNull)
@@ -126,7 +179,7 @@ impl RedisCodec {
                     Ok(())
                 }
             },
-            b'#' => {
+            RESPOpcode::BOOLEAN => {
                 let s = get_line(buf)?;
                 if s.len() != 1 {
                     let invalid_bool_val = std::str::from_utf8(s)?.to_string();
@@ -135,15 +188,15 @@ impl RedisCodec {
                     Ok(())
                 }
             },
-            b',' => {
+            RESPOpcode::DOUBLE => {
                 let _s = get_line(buf)?;
                 Ok(())
             },
-            b'(' => {
+            RESPOpcode::BIG_NUMBER => {
                 let _s = get_line(buf)?;
                 Ok(())
             },
-            b'=' => {
+            RESPOpcode::VERBATIM_STRING => {
                 let str_len = get_integer(buf)?;
                 if str_len < -1 {
                     Err(RESPParseError::NegativeLength)
@@ -160,7 +213,7 @@ impl RedisCodec {
                     }
                 }
             },
-            b'%' => {
+            RESPOpcode::MAP => {
                 let num_key_values = get_integer(buf)?;
                 if num_key_values < 0 {
                     Err(RESPParseError::NegativeLength)
@@ -328,6 +381,111 @@ impl RedisCodec {
             Ok(commands)
         }
     }
+
+    fn encode_redis_command(&mut self, item: &RESPItem, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
+        dst.put_u8(item.opcode());
+        match item {
+            RESPItem::SimpleString(s) => {
+                self.encode_simple_string(&s, dst);
+            },
+            RESPItem::SimpleError(e) => {
+                self.encode_simple_string(&e, dst);
+            },
+            RESPItem::Integer(i) => {
+                self.encode_number(*i, dst);
+            },
+            RESPItem::BulkString(b) => {
+                self.encode_bulk_string(&b, dst);
+            },
+            RESPItem::Array(ref a) => {
+                self.encode_aggregate(a, dst)?;
+            },
+            RESPItem::Null =>{
+                self.encode_crlf(dst);
+            },
+            RESPItem::Boolean(val) => {
+                self.encode_simple_string(if *val { "t" } else { "f" }, dst);
+            },
+            RESPItem::Double(d) => {
+                self.encode_number(*d, dst);
+            },
+            RESPItem::BigNumber(bn) => {
+                self.encode_simple_string(bn.to_string().as_ref(), dst);
+            },
+            RESPItem::BulkError(be) => {
+                self.encode_bulk_string(&be, dst);
+            },
+            RESPItem::VerbatimString { encoding, data } => {
+                if encoding.len() != 3 {
+                    return Err(RESPEncodeError::VerbatimStringEncodingNameLength);
+                }
+                let formatted = format!("{}:{}", encoding, data);
+                self.encode_bulk_string(&formatted, dst);
+            },
+            RESPItem::Map(ref m) => {
+                self.encode_number(m.len(), dst);
+                for (k, v) in m {
+                    self.encode_redis_command(k, dst)?;
+                    self.encode_redis_command(v, dst)?;
+                }
+            },
+            RESPItem::Set(ref s) => {
+                self.encode_aggregate(s, dst)?;
+            },
+            RESPItem::Push(ref p) => {
+                self.encode_aggregate(p, dst)?;
+            },
+        };
+        Ok(())
+    }
+
+    fn encode_aggregate(&mut self, items: &Vec<RESPItem>, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
+        self.encode_number(items.len(), dst);
+        for resp_item in items {
+            self.encode_redis_command(resp_item, dst)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn encode_bulk_string(&mut self, s: &str, dst: &mut BytesMut) {
+        self.encode_number(s.len(), dst);
+        self.encode_simple_string(s, dst);
+    }
+
+    #[inline]
+    fn encode_number<N: Num + ToString>(&mut self, i: N, dst: &mut BytesMut) {
+        dst.put_slice(i.to_string().as_bytes());
+        self.encode_crlf(dst);
+    }
+
+    #[inline]
+    fn encode_simple_string(&mut self, s: &str, dst: &mut BytesMut) {
+        dst.put_slice(s.as_bytes());
+        self.encode_crlf(dst);
+    }
+
+    #[inline]
+    fn encode_crlf(&mut self, dst: &mut BytesMut) {
+        dst.put_slice("\r\n".as_bytes())
+    }
+}
+
+impl Decoder for RESPCodec {
+    type Item = RESPItem;
+    type Error = RESPParseError;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.decode_redis_command(buf)
+    }
+}
+
+impl Encoder<RESPItem> for RESPCodec {
+    type Error = RESPEncodeError;
+
+    fn encode(&mut self, item: RESPItem, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        self.encode_redis_command(&item, dst)
+    }
 }
 
 fn get_integer(buf: &mut Cursor<&[u8]>) -> Result<i64, RESPParseError> {
@@ -350,15 +508,6 @@ fn get_line<'a>(buf: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], RESPParseError> 
     return Err(RESPParseError::Incomplete);
 }
 
-impl Decoder for RedisCodec {
-    type Item = RESPItem;
-    type Error = RESPParseError;
-
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        self.decode_redis_command(buf)
-    }
-}
-
 #[cfg(test)]
 mod redis_decoding {
     use super::*;
@@ -367,7 +516,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_simple_string() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("+OK\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(SimpleString("OK".to_string()))));
@@ -375,7 +524,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_simple_error() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("-Error message\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(SimpleError("Error message".to_string()))));
@@ -383,7 +532,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_correct_integer_with_positive_sign() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(":+100\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Integer(100))));
@@ -391,7 +540,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_correct_integer_without_sign() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(":100\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Integer(100))));
@@ -399,7 +548,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_zero_integer_correctly() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(":0\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Integer(0))));
@@ -407,7 +556,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_correct_integer_negative() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(":-100\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Integer(-100))));
@@ -415,7 +564,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_error_on_integer_overflow() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(":+100000000000000000000000000000000000000000000000000\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Err(MalformedInteger));
@@ -423,7 +572,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_error_on_invalid_integer_format() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
 
         for (name, inv_str) in vec![
             ("double plus", ":++100\r\n"),
@@ -438,7 +587,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_well_formed_bulk_string() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$5\r\nhello\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(BulkString("hello".to_string()))));
@@ -446,7 +595,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_well_formed_null_bulk_string() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$-1\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Null)));
@@ -454,7 +603,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_well_formed_empty_bulk_string() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$0\r\n\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(BulkString("".to_string()))));
@@ -462,7 +611,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_bad_bulk_string_with_invalid_negative_length() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$-10\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Err(NegativeLength));
@@ -470,7 +619,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_bad_bulk_string_with_length_mismatch_more_chars() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$5\r\nhelloo\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Err(MalformedBulkStringLengthMismatch));
@@ -478,7 +627,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_bad_bulk_string_with_length_mismatch_fewer_chars() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("$5\r\nhell\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Err(MalformedBulkStringLengthMismatch));
@@ -486,7 +635,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_empty_array() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("*0\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Array(vec![]))));
@@ -494,7 +643,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_array_bulk_string_hello_world() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Array(vec![
@@ -505,7 +654,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_array_list_of_integers() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from("*3\r\n:1\r\n:2\r\n:3\r\n");
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Array(vec![Integer(1), Integer(2), Integer(3)]))));
@@ -513,7 +662,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_array_of_mixed_data_types() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(concat!(
             "*5\r\n",
             ":1\r\n",
@@ -531,7 +680,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_boolean() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         for (name, redis_str, expected) in vec![
             ("true", "#t\r\n", Ok(Some(Boolean(true)))),
             ("false", "#f\r\n", Ok(Some(Boolean(false)))),
@@ -546,7 +695,7 @@ mod redis_decoding {
 
     #[test]
     fn test_parse_double() {
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         for (name, redis_str, expected) in vec![
             ("positive without fractional part - positive integer", ",10\r\n", Ok(Some(Double(10.0)))),
             ("negative without fractional part - negative integer", ",-10\r\n", Ok(Some(Double(-10.0)))),
@@ -570,7 +719,7 @@ mod redis_decoding {
     #[test]
     fn test_parse_double_nan() {
         let mut buffer = BytesMut::from(",nan\r\n");
-        let mut codec = RedisCodec::new();
+        let mut codec = RESPCodec::new();
         let decoded = codec.decode(&mut buffer);
         assert!(match decoded.unwrap().unwrap() {
             Double(x) if x.is_nan() => true,
