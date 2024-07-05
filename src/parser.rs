@@ -8,12 +8,12 @@ use tokio_util::codec::Decoder;
 pub struct RedisCodec;
 
 #[derive(Debug, PartialEq)]
-pub enum RedisCommand {
+pub enum RESPItem {
     SimpleString(String),          // +
     SimpleError(String),           // -
     Integer(i64),                  // :
     BulkString(String),            // $
-    Array(Vec<RedisCommand>),      // *
+    Array(Vec<RESPItem>),          // *
     Null,                          // _
     Boolean(bool),                 // #
     Double(f64),                   // ,
@@ -22,14 +22,14 @@ pub enum RedisCommand {
     VerbatimString{
         encoding: String,
         data: String,
-    },                                    // =
-    Map(Vec<(RedisCommand, RedisCommand)>), // %
-    Set(Vec<RedisCommand>),                 // ~
-    Push(Vec<RedisCommand>),                // >
+    },                              // =
+    Map(Vec<(RESPItem, RESPItem)>), // %
+    Set(Vec<RESPItem>),             // ~
+    Push(Vec<RESPItem>),            // >
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum RedisParseError {
+pub enum RESPParseError {
     Inner(String),
     Incomplete,
     MalformedInteger,
@@ -44,18 +44,18 @@ pub enum RedisParseError {
     NegativeLength,
     MalformedUtf8String,
     MalformedCommand,
-    AggregateError(usize, Box<RedisParseError>),
+    AggregateError(usize, Box<RESPParseError>),
 }
 
-impl From<Error> for RedisParseError {
+impl From<Error> for RESPParseError {
     fn from(value: Error) -> Self {
-        RedisParseError::Inner(value.to_string())
+        RESPParseError::Inner(value.to_string())
     }
 }
 
-impl From<Utf8Error> for RedisParseError {
+impl From<Utf8Error> for RESPParseError {
     fn from(_value: Utf8Error) -> Self {
-        RedisParseError::MalformedUtf8String
+        RESPParseError::MalformedUtf8String
     }
 }
 
@@ -64,21 +64,21 @@ impl RedisCodec {
         RedisCodec {}
     }
 
-    fn decode_redis_command(&mut self, buf: &mut BytesMut) -> Result<Option<RedisCommand>, RedisParseError> {
+    fn decode_redis_command(&mut self, buf: &mut BytesMut) -> Result<Option<RESPItem>, RESPParseError> {
         let mut cursor = Cursor::new(&buf[..]);
         match self.check_redis_command(&mut cursor) {
             Ok(()) => {
                 cursor.set_position(0);
                 self.parse_redis_command(&mut cursor)
             },
-            Err(RedisParseError::Incomplete) => Ok(None),
+            Err(RESPParseError::Incomplete) => Ok(None),
             Err(err) => Err(err),
         }
     }
 
-    fn check_redis_command(&mut self, buf: &mut Cursor<&[u8]>) -> Result<(), RedisParseError> {
+    fn check_redis_command(&mut self, buf: &mut Cursor<&[u8]>) -> Result<(), RESPParseError> {
         if !buf.has_remaining() {
-            return Err(RedisParseError::Incomplete);
+            return Err(RESPParseError::Incomplete);
         }
         let opcode = buf.get_u8();
         match opcode {
@@ -93,13 +93,13 @@ impl RedisCodec {
             b'$' | b'!' => {
                 let str_len = get_integer(buf)?;
                 if str_len < -1 {
-                    Err(RedisParseError::NegativeLength)
+                    Err(RESPParseError::NegativeLength)
                 } else if str_len == -1 {
                     Ok(())
                 } else {
                     let str = get_line(buf)?;
                     if str.len() != str_len as usize {
-                        Err(RedisParseError::MalformedBulkStringLengthMismatch)
+                        Err(RESPParseError::MalformedBulkStringLengthMismatch)
                     } else {
                         Ok(())
                     }
@@ -108,7 +108,7 @@ impl RedisCodec {
             b'*' | b'~' | b'>' => {
                 let arr_len = get_integer(buf)?;
                 if arr_len < 0 {
-                    Err(RedisParseError::MalformedArrayNegativeLength)
+                    Err(RESPParseError::MalformedArrayNegativeLength)
                 } else {
                     let mut elem_cnt = 0;
                     while elem_cnt < arr_len {
@@ -121,7 +121,7 @@ impl RedisCodec {
             b'_' => {
                 let s = get_line(buf)?;
                 if !s.is_empty() {
-                    Err(RedisParseError::MalformedNull)
+                    Err(RESPParseError::MalformedNull)
                 } else {
                     Ok(())
                 }
@@ -130,7 +130,7 @@ impl RedisCodec {
                 let s = get_line(buf)?;
                 if s.len() != 1 {
                     let invalid_bool_val = std::str::from_utf8(s)?.to_string();
-                    Err(RedisParseError::MalformedBoolean(invalid_bool_val))
+                    Err(RESPParseError::MalformedBoolean(invalid_bool_val))
                 } else {
                     Ok(())
                 }
@@ -146,15 +146,15 @@ impl RedisCodec {
             b'=' => {
                 let str_len = get_integer(buf)?;
                 if str_len < -1 {
-                    Err(RedisParseError::NegativeLength)
+                    Err(RESPParseError::NegativeLength)
                 } else {
                     let str = get_line(buf)?;
                     if str.len() != str_len as usize {
-                        Err(RedisParseError::MalformedBulkStringLengthMismatch)
+                        Err(RESPParseError::MalformedBulkStringLengthMismatch)
                     } else if str.len() < 4 {
-                        Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars)
+                        Err(RESPParseError::VerbatimStringMustAtLeastHave4Chars)
                     } else if str[3] != b':' {
-                        Err(RedisParseError::VerbatimStringFormatMalformed)
+                        Err(RESPParseError::VerbatimStringFormatMalformed)
                     } else {
                         Ok(())
                     }
@@ -163,7 +163,7 @@ impl RedisCodec {
             b'%' => {
                 let num_key_values = get_integer(buf)?;
                 if num_key_values < 0 {
-                    Err(RedisParseError::NegativeLength)
+                    Err(RESPParseError::NegativeLength)
                 } else {
                     let mut check_cnt = 0;
                     while check_cnt < num_key_values {
@@ -174,135 +174,135 @@ impl RedisCodec {
                     return Ok(());
                 }
             },
-            _ => Err(RedisParseError::UnknownCommandType(opcode as char)),
+            _ => Err(RESPParseError::UnknownCommandType(opcode as char)),
         }
     }
 
-    fn parse_redis_command(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<RedisCommand>, RedisParseError> {
+    fn parse_redis_command(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<RESPItem>, RESPParseError> {
         if !cursor.has_remaining() {
-            return Err(RedisParseError::Incomplete);
+            return Err(RESPParseError::Incomplete);
         }
         let opcode = cursor.get_u8();
         match opcode {
             b'+' => {
                 let line = get_line(&mut cursor)?;
                 let str = std::str::from_utf8(line)?;
-                Ok(Some(RedisCommand::SimpleString(str.to_string())))
+                Ok(Some(RESPItem::SimpleString(str.to_string())))
             }
             b'-' => {
                 let line = get_line(&mut cursor)?;
                 let str = std::str::from_utf8(line)?;
-                Ok(Some(RedisCommand::SimpleError(str.to_string())))
+                Ok(Some(RESPItem::SimpleError(str.to_string())))
             },
             b':' => {
                 let num = get_integer(&mut cursor)?;
-                Ok(Some(RedisCommand::Integer(num)))
+                Ok(Some(RESPItem::Integer(num)))
             },
             b'$' => {
                 if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
-                    Ok(Some(RedisCommand::BulkString(bulk_str)))
+                    Ok(Some(RESPItem::BulkString(bulk_str)))
                 } else {
-                    Ok(Some(RedisCommand::Null))
+                    Ok(Some(RESPItem::Null))
                 }
             },
             b'!' => {
                 if let Some(bulk_err) = self.parse_bulk_string(&mut cursor)? {
-                    Ok(Some(RedisCommand::BulkError(bulk_err)))
+                    Ok(Some(RESPItem::BulkError(bulk_err)))
                 } else {
-                    Ok(Some(RedisCommand::Null))
+                    Ok(Some(RESPItem::Null))
                 }
             }
-            b'*' => Ok(Some(RedisCommand::Array(self.parse_aggregate(&mut cursor)?))),
-            b'~' => Ok(Some(RedisCommand::Set(self.parse_aggregate(&mut cursor)?))),
-            b'>' => Ok(Some(RedisCommand::Push(self.parse_aggregate(&mut cursor)?))),
+            b'*' => Ok(Some(RESPItem::Array(self.parse_aggregate(&mut cursor)?))),
+            b'~' => Ok(Some(RESPItem::Set(self.parse_aggregate(&mut cursor)?))),
+            b'>' => Ok(Some(RESPItem::Push(self.parse_aggregate(&mut cursor)?))),
             b'_' => {
                 let line = get_line(&mut cursor)?;
                 if line.len() > 0 {
-                    Err(RedisParseError::MalformedNull)
+                    Err(RESPParseError::MalformedNull)
                 } else {
-                    Ok(Some(RedisCommand::Null))
+                    Ok(Some(RESPItem::Null))
                 }
             },
             b'#' => {
                 let line = get_line(&mut cursor)?;
                 if line.len() != 1 {
-                    Err(RedisParseError::MalformedBoolean(std::str::from_utf8(line)?.to_string()))
+                    Err(RESPParseError::MalformedBoolean(std::str::from_utf8(line)?.to_string()))
                 } else {
                     match line[0] {
-                        b't' => Ok(Some(RedisCommand::Boolean(true))),
-                        b'f' => Ok(Some(RedisCommand::Boolean(false))),
-                        oth  => Err(RedisParseError::MalformedBoolean((oth as char).to_string())),
+                        b't' => Ok(Some(RESPItem::Boolean(true))),
+                        b'f' => Ok(Some(RESPItem::Boolean(false))),
+                        oth  => Err(RESPParseError::MalformedBoolean((oth as char).to_string())),
                     }
                 }
             },
             b',' => {
                 let line = get_line(&mut cursor)?;
                 match lexical_core::parse::<f64>(line) {
-                    Ok(val) => Ok(Some(RedisCommand::Double(val))),
-                    Err(_) => Err(RedisParseError::MalformedDouble)
+                    Ok(val) => Ok(Some(RESPItem::Double(val))),
+                    Err(_) => Err(RESPParseError::MalformedDouble)
                 }
             },
             b'(' => {
                 let line = get_line(&mut cursor)?;
                 if let Some(bigint) = BigInt::parse_bytes(line, 10) {
-                    Ok(Some(RedisCommand::BigNumber(bigint)))
+                    Ok(Some(RESPItem::BigNumber(bigint)))
                 } else {
-                    Err(RedisParseError::MalformedInteger)
+                    Err(RESPParseError::MalformedInteger)
                 }
             },
             b'=' => {
                 if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
                     if bulk_str.len() < 4 {
-                        return Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars);
+                        return Err(RESPParseError::VerbatimStringMustAtLeastHave4Chars);
                     }
                     let mut parts = bulk_str.splitn(2, ":")
                         .map(|s| s.to_string())
                         .collect::<Vec<String>>();
                     if parts.len() != 2 {
-                        return Err(RedisParseError::VerbatimStringFormatMalformed);
+                        return Err(RESPParseError::VerbatimStringFormatMalformed);
                     }
-                    Ok(Some(RedisCommand::VerbatimString {
+                    Ok(Some(RESPItem::VerbatimString {
                         encoding: parts.swap_remove(0),
                         data: parts.swap_remove(1),
                     }))
                 } else {
-                    Err(RedisParseError::VerbatimStringMustAtLeastHave4Chars)
+                    Err(RESPParseError::VerbatimStringMustAtLeastHave4Chars)
                 }
             },
             b'%' => {
                 let num_entries = get_integer(&mut cursor)?;
                 if num_entries < 0 {
-                    Err(RedisParseError::NegativeLength)
+                    Err(RESPParseError::NegativeLength)
                 } else if num_entries == 0 {
-                    Ok(Some(RedisCommand::Map(vec![])))
+                    Ok(Some(RESPItem::Map(vec![])))
                 } else {
                     let mut entries = Vec::with_capacity(num_entries as usize);
                     for i in 0..num_entries as usize {
                         let key_cmd = self.parse_redis_command(&mut cursor)
-                            .map_err(|err| RedisParseError::AggregateError(i, Box::new(err)))?
-                            .ok_or(RedisParseError::MalformedCommand)?;
+                            .map_err(|err| RESPParseError::AggregateError(i, Box::new(err)))?
+                            .ok_or(RESPParseError::MalformedCommand)?;
                         let val_cmd = self.parse_redis_command(&mut cursor)
-                            .map_err(|err| RedisParseError::AggregateError(i, Box::new(err)))?
-                            .ok_or(RedisParseError::MalformedCommand)?;
+                            .map_err(|err| RESPParseError::AggregateError(i, Box::new(err)))?
+                            .ok_or(RESPParseError::MalformedCommand)?;
                         entries.push((key_cmd, val_cmd));
                     }
-                    Ok(Some(RedisCommand::Map(entries)))
+                    Ok(Some(RESPItem::Map(entries)))
                 }
             },
-            c => Err(RedisParseError::UnknownCommandType(c as char)),
+            c => Err(RESPParseError::UnknownCommandType(c as char)),
         }
     }
 
-    fn parse_bulk_string(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<String>, RedisParseError> {
+    fn parse_bulk_string(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<String>, RESPParseError> {
         let strlen = get_integer(&mut cursor)?;
         if strlen == -1 {
             Ok(None)
         } else if strlen < 0 {
-            Err(RedisParseError::NegativeLength)
+            Err(RESPParseError::NegativeLength)
         } else {
             let line = get_line(&mut cursor)?;
             if line.len() != (strlen as usize) {
-                Err(RedisParseError::MalformedBulkStringLengthMismatch)
+                Err(RESPParseError::MalformedBulkStringLengthMismatch)
             } else {
                 let str = std::str::from_utf8(line)?;
                 return Ok(Some(str.to_string()))
@@ -310,10 +310,10 @@ impl RedisCodec {
         }
     }
 
-    fn parse_aggregate(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Vec<RedisCommand>, RedisParseError> {
+    fn parse_aggregate(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Vec<RESPItem>, RESPParseError> {
         let arr_len = get_integer(&mut cursor)?;
         if arr_len < 0 {
-            Err(RedisParseError::NegativeLength)
+            Err(RESPParseError::NegativeLength)
         } else if arr_len == 0 {
             Ok(vec![])
         } else {
@@ -321,8 +321,8 @@ impl RedisCodec {
             for i in 0..arr_len as usize {
                 match self.parse_redis_command(&mut cursor) {
                     Ok(Some(cmd)) => commands.push(cmd),
-                    Ok(None) => return Err(RedisParseError::AggregateError(i, Box::new(RedisParseError::MalformedCommand))),
-                    Err(inner_cmd) => return Err(RedisParseError::AggregateError(i, Box::new(inner_cmd))),
+                    Ok(None) => return Err(RESPParseError::AggregateError(i, Box::new(RESPParseError::MalformedCommand))),
+                    Err(inner_cmd) => return Err(RESPParseError::AggregateError(i, Box::new(inner_cmd))),
                 }
             }
             Ok(commands)
@@ -330,14 +330,14 @@ impl RedisCodec {
     }
 }
 
-fn get_integer(buf: &mut Cursor<&[u8]>) -> Result<i64, RedisParseError> {
+fn get_integer(buf: &mut Cursor<&[u8]>) -> Result<i64, RESPParseError> {
     let line = get_line(buf)?;
-    lexical_core::parse::<i64>(line).map_err(|_| RedisParseError::MalformedInteger)
+    lexical_core::parse::<i64>(line).map_err(|_| RESPParseError::MalformedInteger)
 }
 
-fn get_line<'a>(buf: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], RedisParseError> {
+fn get_line<'a>(buf: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], RESPParseError> {
     if !buf.has_remaining() {
-        return Err(RedisParseError::Incomplete);
+        return Err(RESPParseError::Incomplete);
     }
     let start = buf.position() as usize;
     let end = buf.get_ref().len() - 1;
@@ -347,12 +347,12 @@ fn get_line<'a>(buf: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], RedisParseError>
             return Ok(&buf.get_ref()[start..i]);
         }
     }
-    return Err(RedisParseError::Incomplete);
+    return Err(RESPParseError::Incomplete);
 }
 
 impl Decoder for RedisCodec {
-    type Item = RedisCommand;
-    type Error = RedisParseError;
+    type Item = RESPItem;
+    type Error = RESPParseError;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         self.decode_redis_command(buf)
@@ -362,8 +362,8 @@ impl Decoder for RedisCodec {
 #[cfg(test)]
 mod redis_decoding {
     use super::*;
-    use super::RedisCommand::*;
-    use super::RedisParseError::*;
+    use super::RESPItem::*;
+    use super::RESPParseError::*;
 
     #[test]
     fn test_parse_simple_string() {
