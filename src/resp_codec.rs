@@ -28,12 +28,12 @@ impl RESPOpcode {
 pub struct RESPCodec;
 
 #[derive(Debug, PartialEq)]
-pub enum RESPItem {
+pub enum RESPFrame {
     SimpleString(String),          // +
     SimpleError(String),           // -
     Integer(i64),                  // :
     BulkString(String),            // $
-    Array(Vec<RESPItem>),          // *
+    Array(Vec<RESPFrame>),          // *
     Null,                          // _
     Boolean(bool),                 // #
     Double(f64),                   // ,
@@ -43,28 +43,28 @@ pub enum RESPItem {
         encoding: String,
         data: String,
     },                              // =
-    Map(Vec<(RESPItem, RESPItem)>), // %
-    Set(Vec<RESPItem>),             // ~
-    Push(Vec<RESPItem>),            // >
+    Map(Vec<(RESPFrame, RESPFrame)>), // %
+    Set(Vec<RESPFrame>),             // ~
+    Push(Vec<RESPFrame>),            // >
 }
 
-impl RESPItem {
+impl RESPFrame {
     fn opcode(&self) -> u8 {
         match self {
-            RESPItem::SimpleString(_) => RESPOpcode::SIMPLE_STRING,
-            RESPItem::SimpleError(_) => RESPOpcode::SIMPLE_ERROR,
-            RESPItem::Integer(_) => RESPOpcode::INTEGER,
-            RESPItem::BulkString(_) => RESPOpcode::BULK_STRING,
-            RESPItem::Array(_) => RESPOpcode::ARRAY,
-            RESPItem::Null => RESPOpcode::NULL,
-            RESPItem::Boolean(_) => RESPOpcode::BOOLEAN,
-            RESPItem::Double(_) => RESPOpcode::DOUBLE,
-            RESPItem::BigNumber(_) => RESPOpcode::BIG_NUMBER,
-            RESPItem::BulkError(_) => RESPOpcode::BULK_ERROR,
-            RESPItem::VerbatimString { .. } => RESPOpcode::VERBATIM_STRING,
-            RESPItem::Map(_) => RESPOpcode::MAP,
-            RESPItem::Set(_) => RESPOpcode::SET,
-            RESPItem::Push(_) => RESPOpcode::PUSH,
+            RESPFrame::SimpleString(_) => RESPOpcode::SIMPLE_STRING,
+            RESPFrame::SimpleError(_) => RESPOpcode::SIMPLE_ERROR,
+            RESPFrame::Integer(_) => RESPOpcode::INTEGER,
+            RESPFrame::BulkString(_) => RESPOpcode::BULK_STRING,
+            RESPFrame::Array(_) => RESPOpcode::ARRAY,
+            RESPFrame::Null => RESPOpcode::NULL,
+            RESPFrame::Boolean(_) => RESPOpcode::BOOLEAN,
+            RESPFrame::Double(_) => RESPOpcode::DOUBLE,
+            RESPFrame::BigNumber(_) => RESPOpcode::BIG_NUMBER,
+            RESPFrame::BulkError(_) => RESPOpcode::BULK_ERROR,
+            RESPFrame::VerbatimString { .. } => RESPOpcode::VERBATIM_STRING,
+            RESPFrame::Map(_) => RESPOpcode::MAP,
+            RESPFrame::Set(_) => RESPOpcode::SET,
+            RESPFrame::Push(_) => RESPOpcode::PUSH,
         }
     }
 }
@@ -117,7 +117,7 @@ impl RESPCodec {
         RESPCodec {}
     }
 
-    fn decode_redis_command(&mut self, buf: &mut BytesMut) -> Result<Option<RESPItem>, RESPParseError> {
+    fn decode_redis_command(&mut self, buf: &mut BytesMut) -> Result<Option<RESPFrame>, RESPParseError> {
         let mut cursor = Cursor::new(&buf[..]);
         match self.check_redis_command(&mut cursor) {
             Ok(()) => {
@@ -231,79 +231,79 @@ impl RESPCodec {
         }
     }
 
-    fn parse_redis_command(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<RESPItem>, RESPParseError> {
+    fn parse_redis_command(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Option<RESPFrame>, RESPParseError> {
         if !cursor.has_remaining() {
             return Err(RESPParseError::Incomplete);
         }
         let opcode = cursor.get_u8();
         match opcode {
-            b'+' => {
+            RESPOpcode::SIMPLE_STRING => {
                 let line = get_line(&mut cursor)?;
                 let str = std::str::from_utf8(line)?;
-                Ok(Some(RESPItem::SimpleString(str.to_string())))
+                Ok(Some(RESPFrame::SimpleString(str.to_string())))
             }
-            b'-' => {
+            RESPOpcode::SIMPLE_ERROR => {
                 let line = get_line(&mut cursor)?;
                 let str = std::str::from_utf8(line)?;
-                Ok(Some(RESPItem::SimpleError(str.to_string())))
+                Ok(Some(RESPFrame::SimpleError(str.to_string())))
             },
-            b':' => {
+            RESPOpcode::INTEGER => {
                 let num = get_integer(&mut cursor)?;
-                Ok(Some(RESPItem::Integer(num)))
+                Ok(Some(RESPFrame::Integer(num)))
             },
-            b'$' => {
+            RESPOpcode::BULK_STRING => {
                 if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
-                    Ok(Some(RESPItem::BulkString(bulk_str)))
+                    Ok(Some(RESPFrame::BulkString(bulk_str)))
                 } else {
-                    Ok(Some(RESPItem::Null))
+                    Ok(Some(RESPFrame::Null))
                 }
             },
-            b'!' => {
+            RESPOpcode::BULK_ERROR => {
                 if let Some(bulk_err) = self.parse_bulk_string(&mut cursor)? {
-                    Ok(Some(RESPItem::BulkError(bulk_err)))
+                    Ok(Some(RESPFrame::BulkError(bulk_err)))
                 } else {
-                    Ok(Some(RESPItem::Null))
+                    Ok(Some(RESPFrame::Null))
                 }
             }
-            b'*' => Ok(Some(RESPItem::Array(self.parse_aggregate(&mut cursor)?))),
-            b'~' => Ok(Some(RESPItem::Set(self.parse_aggregate(&mut cursor)?))),
-            b'>' => Ok(Some(RESPItem::Push(self.parse_aggregate(&mut cursor)?))),
-            b'_' => {
+            RESPOpcode::ARRAY => Ok(Some(RESPFrame::Array(self.parse_aggregate(&mut cursor)?))),
+            RESPOpcode::SET => Ok(Some(RESPFrame::Set(self.parse_aggregate(&mut cursor)?))),
+            RESPOpcode::PUSH => Ok(Some(RESPFrame::Push(self.parse_aggregate(&mut cursor)?))),
+            RESPOpcode::NULL => {
                 let line = get_line(&mut cursor)?;
                 if line.len() > 0 {
                     Err(RESPParseError::MalformedNull)
                 } else {
-                    Ok(Some(RESPItem::Null))
+                    Ok(Some(RESPFrame::Null))
                 }
             },
-            b'#' => {
+            RESPOpcode::BOOLEAN => {
                 let line = get_line(&mut cursor)?;
                 if line.len() != 1 {
                     Err(RESPParseError::MalformedBoolean(std::str::from_utf8(line)?.to_string()))
                 } else {
                     match line[0] {
-                        b't' => Ok(Some(RESPItem::Boolean(true))),
-                        b'f' => Ok(Some(RESPItem::Boolean(false))),
+                        b't' => Ok(Some(RESPFrame::Boolean(true))),
+                        b'f' => Ok(Some(RESPFrame::Boolean(false))),
                         oth  => Err(RESPParseError::MalformedBoolean((oth as char).to_string())),
                     }
                 }
             },
-            b',' => {
+            RESPOpcode::DOUBLE => {
                 let line = get_line(&mut cursor)?;
                 match lexical_core::parse::<f64>(line) {
-                    Ok(val) => Ok(Some(RESPItem::Double(val))),
+                    Ok(val) => Ok(Some(RESPFrame::Double(val))),
                     Err(_) => Err(RESPParseError::MalformedDouble)
                 }
             },
-            b'(' => {
+            RESPOpcode::BIG_NUMBER => {
                 let line = get_line(&mut cursor)?;
                 if let Some(bigint) = BigInt::parse_bytes(line, 10) {
-                    Ok(Some(RESPItem::BigNumber(bigint)))
+                    Ok(Some(RESPFrame::BigNumber(bigint)))
                 } else {
                     Err(RESPParseError::MalformedInteger)
                 }
             },
-            b'=' => {
+            RESPOpcode::VERBATIM_STRING => {
                 if let Some(bulk_str) = self.parse_bulk_string(&mut cursor)? {
                     if bulk_str.len() < 4 {
                         return Err(RESPParseError::VerbatimStringMustAtLeastHave4Chars);
@@ -314,20 +314,19 @@ impl RESPCodec {
                     if parts.len() != 2 {
                         return Err(RESPParseError::VerbatimStringFormatMalformed);
                     }
-                    Ok(Some(RESPItem::VerbatimString {
-                        encoding: parts.swap_remove(0),
-                        data: parts.swap_remove(1),
-                    }))
+                    let encoding = parts.swap_remove(0);
+                    let data = parts.swap_remove(0);
+                    Ok(Some(RESPFrame::VerbatimString { encoding, data }))
                 } else {
                     Err(RESPParseError::VerbatimStringMustAtLeastHave4Chars)
                 }
             },
-            b'%' => {
+            RESPOpcode::MAP => {
                 let num_entries = get_integer(&mut cursor)?;
                 if num_entries < 0 {
                     Err(RESPParseError::NegativeLength)
                 } else if num_entries == 0 {
-                    Ok(Some(RESPItem::Map(vec![])))
+                    Ok(Some(RESPFrame::Map(vec![])))
                 } else {
                     let mut entries = Vec::with_capacity(num_entries as usize);
                     for i in 0..num_entries as usize {
@@ -339,7 +338,7 @@ impl RESPCodec {
                             .ok_or(RESPParseError::MalformedCommand)?;
                         entries.push((key_cmd, val_cmd));
                     }
-                    Ok(Some(RESPItem::Map(entries)))
+                    Ok(Some(RESPFrame::Map(entries)))
                 }
             },
             c => Err(RESPParseError::UnknownCommandType(c as char)),
@@ -363,7 +362,7 @@ impl RESPCodec {
         }
     }
 
-    fn parse_aggregate(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Vec<RESPItem>, RESPParseError> {
+    fn parse_aggregate(&mut self, mut cursor: &mut Cursor<&[u8]>) -> Result<Vec<RESPFrame>, RESPParseError> {
         let arr_len = get_integer(&mut cursor)?;
         if arr_len < 0 {
             Err(RESPParseError::NegativeLength)
@@ -382,64 +381,64 @@ impl RESPCodec {
         }
     }
 
-    fn encode_redis_command(&mut self, item: &RESPItem, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
+    fn encode_redis_command(&mut self, item: &RESPFrame, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
         dst.put_u8(item.opcode());
         match item {
-            RESPItem::SimpleString(s) => {
+            RESPFrame::SimpleString(s) => {
                 self.encode_simple_string(&s, dst);
             },
-            RESPItem::SimpleError(e) => {
+            RESPFrame::SimpleError(e) => {
                 self.encode_simple_string(&e, dst);
             },
-            RESPItem::Integer(i) => {
+            RESPFrame::Integer(i) => {
                 self.encode_number(*i, dst);
             },
-            RESPItem::BulkString(b) => {
+            RESPFrame::BulkString(b) => {
                 self.encode_bulk_string(&b, dst);
             },
-            RESPItem::Array(ref a) => {
+            RESPFrame::Array(ref a) => {
                 self.encode_aggregate(a, dst)?;
             },
-            RESPItem::Null =>{
+            RESPFrame::Null =>{
                 self.encode_crlf(dst);
             },
-            RESPItem::Boolean(val) => {
+            RESPFrame::Boolean(val) => {
                 self.encode_simple_string(if *val { "t" } else { "f" }, dst);
             },
-            RESPItem::Double(d) => {
+            RESPFrame::Double(d) => {
                 self.encode_number(*d, dst);
             },
-            RESPItem::BigNumber(bn) => {
+            RESPFrame::BigNumber(bn) => {
                 self.encode_simple_string(bn.to_string().as_ref(), dst);
             },
-            RESPItem::BulkError(be) => {
+            RESPFrame::BulkError(be) => {
                 self.encode_bulk_string(&be, dst);
             },
-            RESPItem::VerbatimString { encoding, data } => {
+            RESPFrame::VerbatimString { encoding, data } => {
                 if encoding.len() != 3 {
                     return Err(RESPEncodeError::VerbatimStringEncodingNameLength);
                 }
                 let formatted = format!("{}:{}", encoding, data);
                 self.encode_bulk_string(&formatted, dst);
             },
-            RESPItem::Map(ref m) => {
+            RESPFrame::Map(ref m) => {
                 self.encode_number(m.len(), dst);
                 for (k, v) in m {
                     self.encode_redis_command(k, dst)?;
                     self.encode_redis_command(v, dst)?;
                 }
             },
-            RESPItem::Set(ref s) => {
+            RESPFrame::Set(ref s) => {
                 self.encode_aggregate(s, dst)?;
             },
-            RESPItem::Push(ref p) => {
+            RESPFrame::Push(ref p) => {
                 self.encode_aggregate(p, dst)?;
             },
         };
         Ok(())
     }
 
-    fn encode_aggregate(&mut self, items: &Vec<RESPItem>, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
+    fn encode_aggregate(&mut self, items: &Vec<RESPFrame>, dst: &mut BytesMut) -> Result<(), RESPEncodeError> {
         self.encode_number(items.len(), dst);
         for resp_item in items {
             self.encode_redis_command(resp_item, dst)?;
@@ -455,7 +454,7 @@ impl RESPCodec {
 
     #[inline]
     fn encode_number<N: Num + ToString>(&mut self, i: N, dst: &mut BytesMut) {
-        dst.put_slice(i.to_string().as_bytes());
+        dst.put_slice(i.to_string().to_lowercase().as_bytes());
         self.encode_crlf(dst);
     }
 
@@ -472,7 +471,7 @@ impl RESPCodec {
 }
 
 impl Decoder for RESPCodec {
-    type Item = RESPItem;
+    type Item = RESPFrame;
     type Error = RESPParseError;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -480,10 +479,10 @@ impl Decoder for RESPCodec {
     }
 }
 
-impl Encoder<RESPItem> for RESPCodec {
+impl Encoder<RESPFrame> for RESPCodec {
     type Error = RESPEncodeError;
 
-    fn encode(&mut self, item: RESPItem, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: RESPFrame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode_redis_command(&item, dst)
     }
 }
@@ -509,9 +508,9 @@ fn get_line<'a>(buf: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], RESPParseError> 
 }
 
 #[cfg(test)]
-mod redis_decoding {
+mod resp_decoding {
     use super::*;
-    use super::RESPItem::*;
+    use super::RESPFrame::*;
     use super::RESPParseError::*;
 
     #[test]
@@ -729,16 +728,290 @@ mod redis_decoding {
 
     #[test]
     fn test_positive_bigint() {
-
+        let mut buffer = BytesMut::from("(100000000000000000000000000000000000000000000000\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(BigNumber(BigInt::parse_bytes("100000000000000000000000000000000000000000000000".as_bytes(), 10).unwrap()))), decoded);
     }
 
     #[test]
     fn test_negative_bigint() {
-
+        let mut buffer = BytesMut::from("(-100000000000000000000000000000000000000000000000\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(BigNumber(BigInt::parse_bytes("-100000000000000000000000000000000000000000000000".as_bytes(), 10).unwrap()))), decoded);
     }
 
     #[test]
     fn test_invalid_bigint_representations() {
+        let mut buffer = BytesMut::from("(100000000000000000001001010000100001000100010000000xdead\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Err(MalformedInteger), decoded);
+    }
 
+    #[test]
+    fn test_verbatim_string_correct_encoding() {
+        let mut buffer = BytesMut::from("=14\r\ntxt:helloworld\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(VerbatimString{encoding:"txt".to_string(), data:"helloworld".to_string()})), decoded);
+    }
+
+    #[test]
+    fn test_invalid_verbatim_string_no_encoding_specified() {
+        let mut buffer = BytesMut::from("=10\r\nhelloworld\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Err(VerbatimStringFormatMalformed), decoded);
+    }
+
+    #[test]
+    fn test_invalid_verbatim_string_encoding_not_equal_to_3_chars() {
+        let mut buffer = BytesMut::from("=10\r\nxy:loworld\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Err(VerbatimStringFormatMalformed), decoded);
+    }
+
+    #[test]
+    fn test_invalid_verbatim_string_less_than_4_chars() {
+        let mut buffer = BytesMut::from("=3\r\nhel\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Err(VerbatimStringMustAtLeastHave4Chars), decoded);
+    }
+
+    #[test]
+    fn test_parse_valid_set() {
+        let mut buffer = BytesMut::from("~2\r\n+ok\r\n:100\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(Set(vec![SimpleString("ok".to_string()), Integer(100)]))), decoded);
+    }
+
+    #[test]
+    fn test_parse_valid_push() {
+        let mut buffer = BytesMut::from(">2\r\n:100\r\n:200\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(Push(vec![Integer(100), Integer(200)]))), decoded);
+    }
+
+    #[test]
+    fn test_parse_valid_map() {
+        let mut buffer = BytesMut::from("%2\r\n+foo\r\n:100\r\n+bar\r\n:200\r\n");
+        let mut codec = RESPCodec::new();
+        let decoded = codec.decode(&mut buffer);
+        assert_eq!(Ok(Some(Map(vec![
+            (SimpleString("foo".to_string()), Integer(100)),
+            (SimpleString("bar".to_string()), Integer(200)),
+        ]))), decoded);
+    }
+
+    #[test]
+    fn test_parse_invalid_map_with_odd_number_of_items() {
+        let buffer = BytesMut::from("%2\r\n+foo\r\n:100\r\n+bar\r\n");
+        let mut codec = RESPCodec::new();
+        let mut cursor = Cursor::new(&buffer[..]);
+        let decoded = codec.parse_redis_command(&mut cursor);
+        assert_eq!(Err(AggregateError(1, Box::new(Incomplete))), decoded);
+    }
+}
+
+#[cfg(test)]
+mod resp_encoding {
+    use std::str::from_utf8;
+    use crate::resp_codec::RESPEncodeError::VerbatimStringEncodingNameLength;
+    use super::*;
+    use super::RESPFrame::*;
+
+    #[test]
+    fn test_encode_simple_string() {
+        let resp = SimpleString("abc".to_string());
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "+abc\r\n");
+    }
+
+    #[test]
+    fn test_encode_simple_error() {
+        let resp = SimpleError("error".to_string());
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "-error\r\n");
+    }
+
+    #[test]
+    fn test_encode_bulk_string() {
+        let resp = BulkString("abc".to_string());
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "$3\r\nabc\r\n");
+    }
+
+    #[test]
+    fn test_encode_bulk_error() {
+        let resp = BulkError("abc".to_string());
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "!3\r\nabc\r\n");
+    }
+
+    #[test]
+    fn test_encode_array_with_mixed_data_types() {
+        let resp = Array(vec![
+            Integer(100),
+            SimpleString("abc".to_string()),
+            BulkString("def".to_string()),
+        ]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(),
+                   "*3\r\n:100\r\n+abc\r\n$3\r\ndef\r\n");
+    }
+
+    #[test]
+    fn test_encode_array_with_single_data_types() {
+        let resp = Array(vec![Integer(100), Integer(200), Integer(300)]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(),
+                   "*3\r\n:100\r\n:200\r\n:300\r\n");
+    }
+
+    #[test]
+    fn test_encode_array_with_nested_aggregate_types() {
+        let resp = Array(vec![
+            Array(vec![Integer(100), Double(1.5)]),
+            Array(vec![
+                SimpleString("ok".to_string()),
+                SimpleError("error".to_string()),
+            ]),
+        ]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(),
+                "*2\r\n*2\r\n:100\r\n,1.5\r\n*2\r\n+ok\r\n-error\r\n");
+    }
+
+    #[test]
+    fn test_encode_set_with_simple_data() {
+        let resp = Set(vec![SimpleString("a".to_string()), SimpleString("b".to_string())]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "~2\r\n+a\r\n+b\r\n");
+    }
+
+    #[test]
+    fn test_encode_map_with_simple_data() {
+        let resp = Map(vec![
+            (Integer(100), SimpleString("a".to_string())),
+            (Integer(200), SimpleString("b".to_string())),
+        ]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "%2\r\n:100\r\n+a\r\n:200\r\n+b\r\n");
+    }
+
+    #[test]
+    fn test_encode_map_with_heterogeneous_data() {
+        let resp = Map(vec![
+            (Integer(100), SimpleString("a".to_string())),
+            (SimpleString("ok".to_string()), Array(vec![Integer(10), Integer(20)])),
+        ]);
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(),
+                   "%2\r\n:100\r\n+a\r\n+ok\r\n*2\r\n:10\r\n:20\r\n");
+    }
+
+    #[test]
+    fn test_encode_simple_types() {
+        let test_cases = vec![
+            ("positive", Integer(100), ":100\r\n"),
+            ("zero",     Integer(0),   ":0\r\n"),
+            ("negative", Integer(-20), ":-20\r\n"),
+
+            ("positive", Double(1.4),  ",1.4\r\n"),
+            ("zero",     Double(0.0),  ",0\r\n"),
+            ("negative", Double(-1.3), ",-1.3\r\n"),
+            ("+infinity", Double(f64::INFINITY), ",inf\r\n"),
+            ("-infinity", Double(f64::NEG_INFINITY), ",-inf\r\n"),
+            ("nan", Double(f64::NAN), ",nan\r\n"),
+
+            ("big positive", BigNumber(BigInt::from(1000)), "(1000\r\n"),
+            ("big negative", BigNumber(BigInt::from(-100)), "(-100\r\n"),
+            ("big zero", BigNumber(BigInt::from(0)), "(0\r\n"),
+
+            ("boolean true", Boolean(true), "#t\r\n"),
+            ("boolean false", Boolean(false), "#f\r\n"),
+
+            ("null", Null, "_\r\n"),
+        ];
+        let mut encoder = RESPCodec::new();
+        for (test_name, resp_frame, expected_output) in test_cases.into_iter() {
+            let mut buff = BytesMut::new();
+            let res = encoder.encode(resp_frame, &mut buff);
+            assert!(res.is_ok(), "{test_name:?}");
+            assert_eq!(from_utf8(buff.as_ref()).unwrap(), expected_output, "{expected_output:?}");
+        }
+    }
+
+    #[test]
+    fn test_encode_valid_verbatim_string() {
+        let resp = VerbatimString {
+            encoding: "txt".to_string(),
+            data:     "hello".to_string(),
+        };
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert!(res.is_ok());
+        assert_eq!(from_utf8(buff.as_ref()).unwrap(), "=9\r\ntxt:hello\r\n");
+    }
+
+    #[test]
+    fn test_encode_should_error_when_verbatim_string_format_is_missing() {
+        let resp = VerbatimString {
+            encoding: "".to_string(),
+            data:     "hello".to_string(),
+        };
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert_eq!(Err(VerbatimStringEncodingNameLength), res);
+    }
+
+    #[test]
+    fn test_encode_should_error_when_verbatim_string_format_is_not_3_chars() {
+        let resp = VerbatimString{
+            encoding: "ab".to_string(),
+            data: "hello".to_string()
+        };
+        let mut encoder = RESPCodec::new();
+        let mut buff = BytesMut::new();
+        let res = encoder.encode(resp, &mut buff);
+        assert_eq!(Err(VerbatimStringEncodingNameLength), res);
     }
 }
