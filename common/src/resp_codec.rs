@@ -1,5 +1,7 @@
+use std::fmt::{Display, Formatter};
 use std::io::{Cursor, Error, ErrorKind};
 use std::str::Utf8Error;
+
 use num::Num;
 use num_bigint::BigInt;
 use tokio_util::bytes::{Buf, BufMut, BytesMut};
@@ -117,6 +119,14 @@ impl From<Error> for RESPEncodeError {
         RESPEncodeError::Inner(value.to_string())
     }
 }
+
+impl Display for RESPEncodeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&*self.to_string())
+    }
+}
+
+impl std::error::Error for RESPEncodeError {}
 
 impl RESPCodec {
     pub fn new() -> Self {
@@ -828,7 +838,9 @@ mod resp_decoding {
 #[cfg(test)]
 mod resp_encoding {
     use std::str::from_utf8;
+
     use crate::resp_codec::RESPEncodeError::VerbatimStringEncodingNameLength;
+
     use super::*;
     use super::RESPFrame::*;
 

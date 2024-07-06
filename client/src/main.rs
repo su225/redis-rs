@@ -16,7 +16,6 @@ struct RedisClientArgs {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = RedisClientArgs::parse();
     let redis_addr = format!("{}:{}", args.host, args.port);
-    let redis_client = client::RedisClient::new(redis_addr);
-    redis_client.execute().await?;
+    let redis_client = client::RedisClient::connect(redis_addr).await?;
     Ok(())
 }
