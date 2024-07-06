@@ -1,4 +1,4 @@
-use std::io::{Cursor, Error};
+use std::io::{Cursor, Error, ErrorKind};
 use std::str::Utf8Error;
 use num::Num;
 use num_bigint::BigInt;
@@ -49,7 +49,7 @@ pub enum RESPFrame {
 }
 
 impl RESPFrame {
-    fn opcode(&self) -> u8 {
+    pub fn opcode(&self) -> u8 {
         match self {
             RESPFrame::SimpleString(_) => RESPOpcode::SIMPLE_STRING,
             RESPFrame::SimpleError(_) => RESPOpcode::SIMPLE_ERROR,
@@ -104,6 +104,12 @@ impl From<Utf8Error> for RESPParseError {
 pub enum RESPEncodeError {
     Inner(String),
     VerbatimStringEncodingNameLength,
+}
+
+impl From<RESPEncodeError> for Error {
+    fn from(value: RESPEncodeError) -> Self {
+        Error::new(ErrorKind::Other, format!("{value:?}"))
+    }
 }
 
 impl From<Error> for RESPEncodeError {
@@ -663,12 +669,12 @@ mod resp_decoding {
     fn test_parse_array_of_mixed_data_types() {
         let mut codec = RESPCodec::new();
         let mut buffer = BytesMut::from(concat!(
-            "*5\r\n",
-            ":1\r\n",
-            ":2\r\n",
-            ":3\r\n",
-            ":4\r\n",
-            "$5\r\nhello\r\n",
+        "*5\r\n",
+        ":1\r\n",
+        ":2\r\n",
+        ":3\r\n",
+        ":4\r\n",
+        "$5\r\nhello\r\n",
         ));
         let decoded = codec.decode(&mut buffer);
         assert_eq!(decoded, Ok(Some(Array(vec![
@@ -906,7 +912,7 @@ mod resp_encoding {
         let res = encoder.encode(resp, &mut buff);
         assert!(res.is_ok());
         assert_eq!(from_utf8(buff.as_ref()).unwrap(),
-                "*2\r\n*2\r\n:100\r\n,1.5\r\n*2\r\n+ok\r\n-error\r\n");
+                   "*2\r\n*2\r\n:100\r\n,1.5\r\n*2\r\n+ok\r\n-error\r\n");
     }
 
     #[test]
