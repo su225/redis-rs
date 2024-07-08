@@ -72,8 +72,36 @@ impl RESPFrame {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub enum RESPConversionError {
+    TypeMismatchError
+}
+
+impl TryInto<String> for RESPFrame {
+    type Error = RESPConversionError;
+
+    fn try_into(self) -> Result<String, Self::Error> {
+        match self {
+            RESPFrame::SimpleString(s) => Ok(s),
+            RESPFrame::BulkString(s) => Ok(s),
+            _ => Err(RESPConversionError::TypeMismatchError),
+        }
+    }
+}
+
+impl TryInto<i64> for RESPFrame {
+    type Error = RESPConversionError;
+
+    fn try_into(self) -> Result<i64, Self::Error> {
+        match self {
+            RESPFrame::Integer(i) => Ok(i),
+            _ => Err(RESPConversionError::TypeMismatchError),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum RESPParseError {
-    Inner(String),
+    IOError(String),
     Incomplete,
     MalformedInteger,
     MalformedBulkStringLengthMismatch,
@@ -85,20 +113,20 @@ pub enum RESPParseError {
     VerbatimStringMustAtLeastHave4Chars,
     VerbatimStringFormatMalformed,
     NegativeLength,
-    MalformedUtf8String,
+    MalformedUtf8String(Utf8Error),
     MalformedCommand,
     AggregateError(usize, Box<RESPParseError>),
 }
 
 impl From<Error> for RESPParseError {
     fn from(value: Error) -> Self {
-        RESPParseError::Inner(value.to_string())
+        RESPParseError::IOError(value.to_string())
     }
 }
 
 impl From<Utf8Error> for RESPParseError {
-    fn from(_value: Utf8Error) -> Self {
-        RESPParseError::MalformedUtf8String
+    fn from(inner: Utf8Error) -> Self {
+        RESPParseError::MalformedUtf8String(inner)
     }
 }
 
