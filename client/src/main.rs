@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod client;
+mod ping;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, disable_help_flag = true)]

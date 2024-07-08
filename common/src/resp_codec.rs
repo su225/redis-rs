@@ -166,7 +166,9 @@ impl RESPCodec {
         match self.check_redis_command(&mut cursor) {
             Ok(()) => {
                 cursor.set_position(0);
-                self.parse_redis_command(&mut cursor)
+                let parsed = self.parse_redis_command(&mut cursor);
+                buf.advance(cursor.position() as usize);
+                parsed
             },
             Err(RESPParseError::Incomplete) => Ok(None),
             Err(err) => Err(err),

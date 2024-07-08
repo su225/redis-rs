@@ -36,7 +36,7 @@ pub enum RedisClientError {
 
 // -- start of RedisCommand machinery --
 
-trait RedisCommand {
+pub trait RedisCommand {
     type Request: TryInto<RESPFrame, Error=RedisClientError>;
     type Response: TryFrom<RESPFrame, Error=RedisClientError>;
 }
